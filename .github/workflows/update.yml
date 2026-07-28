@@ -1,13 +1,21 @@
 name: 增量更新
 
 on:
-  schedule:
-    - cron: '0 2 * * 0'
   workflow_dispatch:
+    inputs:
+      from_setup:
+        description: '是否由首次建档链式触发（true 时跑完会触发全量重试）'
+        required: false
+        default: 'false'
+      only_index:
+        description: '仅重建索引（true 时跳过所有抓取，只跑 build-index，用于改完置顶/资料后快速生效）'
+        required: false
+        default: 'false'
 
 jobs:
   update-html-image:
     name: 增量 HTML+图片
+    if: github.event.inputs.only_index != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -136,6 +144,7 @@ jobs:
 
   update-video:
     name: 增量 视频
+    if: github.event.inputs.only_index != 'true'
     needs: update-html-image
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -219,6 +228,7 @@ jobs:
   update-avatar:
     name: 增量 头像+收尾
     needs: update-video
+    if: always() && (github.event.inputs.only_index == 'true' || needs.update-video.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -256,6 +266,7 @@ jobs:
         run: curl -fsSL "https://raw.githubusercontent.com/sjshb57/Test/main/archive.py" -o /tmp/archive.py
 
       - name: fetch-avatars
+        if: github.event.inputs.only_index != 'true'
         run: |
           while IFS= read -r U; do
             if [ -z "$U" ]; then continue; fi
@@ -265,6 +276,7 @@ jobs:
           done <<< "${{ steps.info.outputs.accounts }}"
 
       - name: retry --avatar-failed
+        if: github.event.inputs.only_index != 'true'
         run: |
           while IFS= read -r U; do
             if [ -z "$U" ]; then continue; fi
@@ -274,6 +286,7 @@ jobs:
           done <<< "${{ steps.info.outputs.accounts }}"
 
       - name: clean-html --force
+        if: github.event.inputs.only_index != 'true'
         run: |
           while IFS= read -r U; do
             if [ -z "$U" ]; then continue; fi
@@ -306,3 +319,17 @@ jobs:
           [ "$COUNT" -eq 0 ] && COUNT=$(git diff --cached --numstat | wc -l)
           git commit -m "✅ 增量完成 (+${COUNT} 文件) $(date -u +%Y-%m-%d) [skip ci]"
           git push
+
+      - name: 链式触发全量重试（仅首次建档链路，由 setup 触发时）
+        if: ${{ github.event.inputs.from_setup == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          if [ -z "${{ secrets.DISPATCH_TOKEN }}" ]; then
+            echo "::warning::未配置 DISPATCH_TOKEN,无法自动触发 retry_all.yml"
+            exit 0
+          fi
+          sleep 5
+          gh workflow run retry_all.yml --repo "${{ github.repository }}" \
+            && echo "✅ 已触发全量重试" \
+            || echo "::warning::触发 retry_all.yml 失败"
